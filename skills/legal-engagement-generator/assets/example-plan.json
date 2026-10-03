@@ -1,0 +1,34 @@
+{
+  "schemaVersion": 1,
+  "analysis": {
+    "status": "ready",
+    "unresolved": [],
+    "authorizationBasis": "虚构测试指令：采用内置特别授权条款，用于验证生成流程。",
+    "sources": {"data": "全部为虚构样例，不对应真实案件或证件。"}
+  },
+  "data": {
+    "docs": ["agreement", "authorization", "certificate", "letter"],
+    "procedureType": "litigation_first_instance",
+    "branch": "beijing",
+    "authType": "特别授权",
+    "clientGenerationMode": "separate",
+    "cause": "买卖合同纠纷",
+    "caseNo": "",
+    "court": "示例市示例区人民法院",
+    "signDate": "2026-10-02",
+    "lawyer1": "测试律师甲",
+    "phone1": "010-00000000",
+    "feeMode": "fixed",
+    "feeAmount": "30000",
+    "taxMode": "included",
+    "expenseMode": "client",
+    "arbInstitution": "示例仲裁委员会",
+    "arbSeat": "示例市",
+    "conflictWaiver": false,
+    "parties": [
+      {"name": "虚构客户甲有限公司", "role": "first_plaintiff", "isClient": true, "partyType": "法人", "clientAddress": "示例市虚构路1号", "repName": "测试代表甲", "repPosition": "董事长"},
+      {"name": "虚构对方乙有限公司", "role": "first_defendant", "isClient": false, "partyType": "法人"},
+      {"name": "虚构同方丙有限公司", "role": "first_plaintiff", "isClient": false, "partyType": "法人"}
+    ]
+  }
+}

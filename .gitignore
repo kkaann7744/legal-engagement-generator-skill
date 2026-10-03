@@ -1,0 +1,11 @@
+node_modules/
+__pycache__/
+*.pyc
+.DS_Store
+outputs/
+work/
+source-plan.json
+manifest.json
+verification.json
+model-review.md
+*.zip

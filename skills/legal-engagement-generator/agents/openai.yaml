@@ -1,3 +1,3 @@
 interface:
   display_name: "委托手续制作"
-  short_description: "调用本地工具按内置汉坤模板生成委托文书，并核对客户及授权范围"
+  short_description: "离线填写或根据材料制作委托文书，生成前检查资料并核验主体、程序和费用"

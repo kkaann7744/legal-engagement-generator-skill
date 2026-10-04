@@ -19,6 +19,40 @@ const PARTY_STRINGS = ['name', 'role', 'partyType', 'clientAddress', 'mailingAdd
 const plain = v => v !== null && typeof v === 'object' && !Array.isArray(v);
 const nonempty = v => typeof v === 'string' && v.trim().length > 0;
 const decimal = v => typeof v === 'string' && /^\d+(?:\.\d+)?$/.test(v) && Number.isFinite(Number(v));
+const precise = v => decimal(v) && /^\d+(?:\.\d{1,2})?$/.test(v) && Number(v) <= 999999999999.99;
+
+// Fixed messages only: never copy values or unknown user-supplied keys to stdout.
+const MESSAGES = {
+  required: '缺少此项信息，请从当前材料或用户指令补齐。',
+  not_ready: '资料仍为草稿；补齐缺项后再标记为 ready。',
+  unresolved: '仍有待核事项，应核对后再生成。',
+  sources_required: '请记录关键字段对应的材料位置或用户指令。',
+  authority_source_required: '请记录采用内置特别授权条款的明确依据。',
+  general_authorization_unsupported: '当前模板只支持内置特别授权；其他权限应使用相应模板。',
+  invalid_selection: '此项取值不在支持范围内，请按参数说明填写。',
+  unknown_field: '存在未支持的字段，请对照参数说明检查字段名称。',
+  positive_decimal_required: '请填写大于零的十进制数字字符串。',
+  unsupported_precision: '当前模板保留两位小数，请明确金额或比例口径，避免自动舍入。',
+  invalid_date: '请填写真实有效的 YYYY-MM-DD 日期。',
+  duplicate_party: '存在重复当事人，请合并或核对名称。',
+  opposing_clients_unsupported: '当前工具不支持同时选择不同程序立场的客户。',
+  client_required: '请明确选择至少一名本所客户。',
+  unsupported_identity_label: '当前授权书只支持居民身份证字段，请改用适用模板。',
+  no_applicable_certificate: '自然人不适用当前主体身份证明模板。',
+  hourly_cap_defaults_to_advance: '未填写小时计费封顶金额，模板会将预付金额作为封顶；请核对实际约定。'
+};
+export const explainIssues = issues => issues.map(issue => ({...issue,
+  message: MESSAGES[issue.code] || '参数不符合要求，请按字段路径核对参数说明。'}));
+export function planWarnings(plan) {
+  const d = plan?.data;
+  return d?.docs?.includes('agreement') && d.feeMode === 'hourly' && !nonempty(d.feeCap)
+    ? explainIssues([{field: 'data.feeCap', code: 'hourly_cap_defaults_to_advance'}]) : [];
+}
+export function outputSummary(plan) {
+  const d = plan.data, clients = d.parties.filter(p => p.isClient === true);
+  const skippedCertificates = d.docs.includes('certificate') ? clients.filter(p => p.partyType === '自然人').length : 0;
+  return {clientCount: clients.length, fileCount: clients.length * d.docs.length - skippedCertificates, skippedCertificates};
+}
 export function validatePlan(plan) {
   const issues = [];
   const add = (field, code) => issues.push({field, code});
@@ -95,13 +129,16 @@ export function validatePlan(plan) {
     for (const k of ['arbInstitution', 'arbSeat']) if (!nonempty(d[k])) add('data.' + k, 'required');
     if (!['fixed', 'hybrid', 'hourly'].includes(d.feeMode)) add('data.feeMode', 'invalid_selection');
     if (!decimal(d.feeAmount) || Number(d.feeAmount) <= 0) add('data.feeAmount', 'positive_decimal_required');
+    else if (!precise(d.feeAmount)) add('data.feeAmount', 'unsupported_precision');
     if (!['included', 'excluded'].includes(d.taxMode)) add('data.taxMode', 'invalid_selection');
     if (!['client', 'firm'].includes(d.expenseMode)) add('data.expenseMode', 'invalid_selection');
     if (d.feeMode === 'hybrid') {
       if (!decimal(d.feeRate) || Number(d.feeRate) > 100) add('data.feeRate', 'invalid_percentage');
+      else if (!precise(d.feeRate)) add('data.feeRate', 'unsupported_precision');
       if (sides.has('T')) add('data.feeMode', 'third_party_hybrid_unsupported');
     }
     if (d.feeMode === 'hourly' && nonempty(d.feeCap) && (!decimal(d.feeCap) || Number(d.feeCap) <= 0)) add('data.feeCap', 'positive_decimal_required');
+    else if (d.feeMode === 'hourly' && nonempty(d.feeCap) && !precise(d.feeCap)) add('data.feeCap', 'unsupported_precision');
     if (d.conflictWaiver && !nonempty(d.conflictClient)) add('data.conflictClient', 'required');
   }
   return issues;

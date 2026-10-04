@@ -4,12 +4,26 @@ import { existsSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { spawnSync } from 'node:child_process';
-import { validatePlan } from './schema.mjs';
+import { validatePlan, explainIssues, planWarnings, outputSummary } from './schema.mjs';
 
 const skill = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const args = process.argv.slice(2);
 const emit = x => process.stdout.write(JSON.stringify(x) + '\n');
 function error(code) { const e = new Error(code); e.safeCode = code; return e; }
+function options(args) {
+  const result = {};
+  for (let i = 0; i < args.length; i++) {
+    const key = args[i];
+    if (!['--input', '--output-dir', '--check-only'].includes(key) || key in result) throw error('invalid_arguments');
+    if (key === '--check-only') result[key] = true;
+    else {
+      if (!args[i + 1] || args[i + 1].startsWith('--')) throw error('invalid_arguments');
+      result[key] = args[++i];
+    }
+  }
+  if (!result['--input'] || (result['--check-only'] ? result['--output-dir'] : !result['--output-dir'])) throw error('invalid_arguments');
+  return result;
+}
 async function playwright() {
   if (process.env.PLAYWRIGHT_MODULE) {
     try { return await import(pathToFileURL(path.resolve(process.env.PLAYWRIGHT_MODULE)).href); }
@@ -42,19 +56,21 @@ function pythonPath() {
 let browser, output, ownsOutput = false;
 try {
   if (args.includes('--help')) {
-    emit({usage: 'node generate.mjs --input plan.json --output-dir new-directory'});
+    emit({usage: ['node generate.mjs --input plan.json --check-only', 'node generate.mjs --input plan.json --output-dir new-directory']});
     process.exitCode = 0;
   } else {
-    if (args.length !== 4 || args[0] !== '--input' || args[2] !== '--output-dir') throw error('invalid_arguments');
+    const opts = options(args);
     let plan;
-    try { plan = JSON.parse(await fs.readFile(path.resolve(args[1]), 'utf8')); }
+    try { plan = JSON.parse(await fs.readFile(path.resolve(opts['--input']), 'utf8')); }
     catch { throw error('input_unreadable_or_invalid_json'); }
     const issues = validatePlan(plan);
     if (issues.length) {
-      emit({status: 'invalid_input', issues});
+      emit({status: 'invalid_input', issues: explainIssues(issues)});
       process.exitCode = 2;
+    } else if (opts['--check-only']) {
+      emit({status: 'ready', ...outputSummary(plan), warnings: planWarnings(plan)});
     } else {
-      output = path.resolve(args[3]);
+      output = path.resolve(opts['--output-dir']);
       await fs.mkdir(path.dirname(output), {recursive: true});
       try { await fs.mkdir(output, {mode: 0o700}); ownsOutput = true; }
       catch { throw error('output_exists_or_unwritable'); }
@@ -96,13 +112,22 @@ try {
       const manifest = {schemaVersion: 1, fileCount: files.length, skippedCertificates: generated.skippedCertificates, files};
       await fs.writeFile(path.join(output, 'manifest.json'), JSON.stringify(manifest, null, 2) + '\n', {mode: 0o600, flag: 'wx'});
       const verification = spawnSync(pythonPath(), [path.join(skill, 'scripts', 'verify.py'), '--bundle', output], {encoding: 'utf8', timeout: 60000});
-      if (verification.status !== 0) throw error('verification_failed');
-      emit({status: 'generated', fileCount: files.length, skippedCertificates: generated.skippedCertificates, verification: 'passed'});
+      if (verification.error?.code === 'ENOENT') throw error('python_unavailable');
+      if (verification.error?.code === 'ETIMEDOUT') throw error('verification_timeout');
+      if (verification.status !== 0) {
+        const failure = error('verification_failed');
+        try {
+          const report = JSON.parse(verification.stdout);
+          if (Array.isArray(report.issueCodes)) failure.issueCodes = report.issueCodes.filter(v => typeof v === 'string' && /^[a-z_]{1,80}$/.test(v));
+        } catch {}
+        throw failure;
+      }
+      emit({status: 'generated', fileCount: files.length, skippedCertificates: generated.skippedCertificates, verification: 'passed', warnings: planWarnings(plan)});
     }
   }
 } catch (e) {
   if (ownsOutput) await fs.rm(output, {recursive: true, force: true}).catch(() => {});
-  emit({status: 'failed', code: e.safeCode || 'local_generation_failed'});
+  emit({status: 'failed', code: e.safeCode || 'local_generation_failed', ...(e.issueCodes ? {issueCodes: e.issueCodes} : {})});
   process.exitCode = 2;
 } finally {
   if (browser) await browser.close().catch(() => {});

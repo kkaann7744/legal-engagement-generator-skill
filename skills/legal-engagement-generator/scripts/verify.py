@@ -7,6 +7,7 @@ import os
 import re
 import zipfile
 from datetime import date
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from xml.etree import ElementTree as ET
 
@@ -22,6 +23,55 @@ PROCEDURES = {'litigation_first_instance': '一审', 'litigation_second_instance
               'litigation_retrial': '再审', 'enforcement': '执行',
               'arbitration_applicant': '仲裁', 'arbitration_respondent': '仲裁'}
 DOCS = ('agreement', 'authorization', 'certificate', 'letter')
+
+
+def agreement_issues(data, paragraphs):
+    """Check values in their operative clauses, not incidental numbers elsewhere."""
+    text = re.sub(r'\s+', '', '\n'.join(paragraphs))
+    issues = []
+
+    def amount(pattern, expected, code):
+        match = re.search(pattern, text)
+        try:
+            correct = match and Decimal(match[1].replace(',', '').replace('，', '')) == Decimal(expected)
+        except (InvalidOperation, TypeError):
+            correct = False
+        if not correct:
+            issues.append(code)
+
+    number = r'([\d,，]+(?:\.\d+)?)'
+    mode = data['feeMode']
+    modes = {'fixed': '采取固定收费的方式', 'hybrid': '采取“前期固定律师费+后期风险代理律师费”的方式',
+             'hourly': '采取按实际工作小时计费的方式'}
+    if modes.get(mode, '\0') not in text or any(v in text for k, v in modes.items() if k != mode):
+        issues.append('fee_mode_mismatch')
+    if mode == 'fixed':
+        amount('固定律师费总额为人民币' + number + '元', data['feeAmount'], 'fee_amount_mismatch')
+        amount('自本协议签订之日起五个工作日内支付人民币' + number + '元', data['feeAmount'], 'fee_payment_mismatch')
+    elif mode == 'hybrid':
+        amount('前期固定律师费人民币' + number + '元', data['feeAmount'], 'fee_amount_mismatch')
+        amount(r'(?:支持甲方请求金额|确认的免责金额的)' + number + '%的比例', data['feeRate'], 'fee_rate_mismatch')
+    elif mode == 'hourly':
+        amount('先行预付人民币' + number + '元', data['feeAmount'], 'fee_amount_mismatch')
+        amount('律师费总额不超过人民币' + number + '元', data.get('feeCap') or data['feeAmount'], 'fee_cap_mismatch')
+    included = '（含税，下同）'
+    excluded = '（不含税，下同）'
+    wanted, unwanted = (included, excluded) if data['taxMode'] == 'included' else (excluded, included)
+    if wanted not in text or unwanted in text:
+        issues.append('tax_mode_mismatch')
+    wanted = '均由甲方另行承担' if data['expenseMode'] == 'client' else '均由乙方承担'
+    if wanted not in text:
+        issues.append('expense_mode_mismatch')
+    clauses = [p for p in paragraphs if p.startswith('本协议适用中国法律')]
+    if not any('有权提交' + data['arbInstitution'].strip() in p and '在' + data['arbSeat'].strip() + '进行仲裁' in p for p in clauses):
+        issues.append('agreement_dispute_clause_mismatch')
+    waivers = [p for p in paragraphs if p.startswith('特别约定，甲方充分知晓')]
+    if data.get('conflictWaiver'):
+        if not any(data['conflictClient'].strip() in p for p in waivers):
+            issues.append('conflict_waiver_mismatch')
+    elif waivers:
+        issues.append('unexpected_conflict_waiver')
+    return issues
 
 
 def read_docx(path):
@@ -94,14 +144,24 @@ def verify_bundle(bundle):
             opponents = [p for p in data['parties'] if not p['isClient'] and SIDES[p['role']] != SIDES[c['role']]]
             if any(p['name'].strip() not in text for p in opponents):
                 add('opposing_party_missing', name)
-        client_lines = [p.replace(' ', '').strip() for p in paras if p.replace(' ', '').startswith(('甲方：', '委托人：'))]
-        if kind in ('agreement', 'authorization') and not any(c['name'].strip() in p for p in client_lines):
+        compact = lambda value: re.sub(r'\s+', '', value)
+        client_lines = [compact(p) for p in paras if compact(p).startswith(('甲方：', '委托人：'))]
+        identities = [re.sub(r'（(?:盖章|签字)）$', '', p.split('：', 1)[1]) for p in client_lines]
+        if kind in ('agreement', 'authorization') and compact(c['name']) not in identities:
             add('client_signature_or_title_missing', name)
         others = [p for p in data['parties'] if p['name'] != c['name']]
-        if any(p['name'].strip() in line for p in others for line in client_lines):
+        if any(compact(p['name']) in identities for p in others):
             add('other_party_as_client', name)
-        if kind in ('authorization', 'letter') and data['lawyer1'].strip() not in text:
-            add('lawyer_missing', name)
+        if kind in ('authorization', 'letter'):
+            lawyer_lines = [p for p in paras if compact(p).startswith('受托人：')] if kind == 'authorization' else [p for p in paras if p.startswith('就')]
+            for key in ('lawyer1', 'lawyer2'):
+                lawyer = data.get(key, '').strip()
+                if lawyer and not any(lawyer in p for p in lawyer_lines):
+                    add('lawyer_missing' if key == 'lawyer1' else 'second_lawyer_missing', name)
+        if kind in ('agreement', 'authorization', 'letter') and data['cause'].strip() not in text:
+            add('cause_missing', name)
+        if kind == 'letter' and data.get('caseNo', '').strip() and data['caseNo'].strip() not in text:
+            add('case_number_missing', name)
         if kind == 'letter' and data['court'].strip() not in text:
             add('forum_missing', name)
         procedure = data['procedureType']
@@ -114,6 +174,8 @@ def verify_bundle(bundle):
             scope = {'enforcement': '强制执行', 'litigation_retrial': '审判监督'}.get(procedure, PROCEDURES[procedure])
             if f'本案的{scope}程序' not in text:
                 add('procedure_missing', name)
+            for code in agreement_issues(data, paras):
+                add(code, name)
         if kind == 'letter' and f"参加本案的{PROCEDURES[procedure]}法律程序" not in text:
             add('procedure_missing', name)
         if kind == 'authorization' and '代理权限为特别授权' not in text:
@@ -161,7 +223,8 @@ def main():
         with os.fdopen(fd, 'w', encoding='utf-8') as handle:
             json.dump(result, handle, ensure_ascii=False, indent=2)
             handle.write('\n')
-        print(json.dumps({'status': result['status'], 'fileCount': result['fileCount'], 'issueCount': len(result['issues'])}))
+        print(json.dumps({'status': result['status'], 'fileCount': result['fileCount'], 'issueCount': len(result['issues']),
+                          'issueCodes': sorted({i['code'] for i in result['issues']})}))
         return 0 if result['status'] == 'passed' else 2
     except Exception:
         print(json.dumps({'status': 'failed', 'code': 'bundle_invalid_or_unreadable'}))

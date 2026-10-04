@@ -13,6 +13,45 @@ const temp = await fs.mkdtemp(path.join(os.tmpdir(), 'engagement-synthetic-'));
 const clone = () => structuredClone(base);
 let passed = 0, fileCount = 0;
 
+function tamper(bundle, kind, before, after, expected) {
+  const script = `
+import sys, io, zipfile, importlib.util
+from pathlib import Path
+from xml.etree import ElementTree as ET
+spec = importlib.util.spec_from_file_location('verify', sys.argv[1])
+mod = importlib.util.module_from_spec(spec); spec.loader.exec_module(mod)
+bundle = Path(sys.argv[2]); doc = bundle / ('client-001-' + sys.argv[3] + '.docx')
+original = doc.read_bytes()
+try:
+    stream = io.BytesIO()
+    with zipfile.ZipFile(io.BytesIO(original)) as source, zipfile.ZipFile(stream, 'w') as target:
+        for item in source.infolist():
+            content = source.read(item.filename)
+            if item.filename == 'word/document.xml':
+                root = ET.fromstring(content); changed = False
+                ns = '{http://schemas.openxmlformats.org/wordprocessingml/2006/main}'
+                for paragraph in root.iter(ns + 'p'):
+                    runs = list(paragraph.iter(ns + 't'))
+                    text = ''.join(run.text or '' for run in runs)
+                    if sys.argv[4] in text:
+                        runs[0].text = text.replace(sys.argv[4], sys.argv[5])
+                        for run in runs[1:]: run.text = ''
+                        changed = True
+                assert changed, 'mutation target missing'
+                content = ET.tostring(root, encoding='utf-8', xml_declaration=True)
+            target.writestr(item, content)
+    doc.write_bytes(stream.getvalue())
+    issues = {i['code'] for i in mod.verify_bundle(bundle)['issues']}
+    assert sys.argv[6] in issues, repr(issues)
+finally:
+    doc.write_bytes(original)
+`;
+  const r = spawnSync(process.env.PYTHON_EXECUTABLE || 'python3', ['-c', script,
+    path.join(skill, 'scripts', 'verify.py'), bundle, kind, before, after, expected], {encoding: 'utf8'});
+  assert.equal(r.status, 0, expected + ': ' + r.stderr);
+  passed++;
+}
+
 async function run(key, plan, expected) {
   const input = path.join(temp, key + '.json');
   const output = path.join(temp, key);
@@ -36,9 +75,27 @@ async function run(key, plan, expected) {
   assert.deepEqual(JSON.parse(await fs.readFile(path.join(output, 'manifest.json'), 'utf8')), manifest);
   passed++; fileCount += expected;
   console.log(JSON.stringify({scenario: key, passed: true, fileCount: expected}));
+  return output;
 }
 
 try {
+  const preflightInput = path.join(temp, 'preflight.json');
+  await fs.writeFile(preflightInput, JSON.stringify(base));
+  const beforePreflight = await fs.readdir(temp);
+  const preflight = spawnSync(process.execPath, [path.join(skill, 'scripts', 'generate.mjs'), '--check-only', '--input', preflightInput],
+    {encoding: 'utf8', env: {...process.env, PLAYWRIGHT_MODULE: '/missing-playwright', PYTHON_EXECUTABLE: '/missing-python'}});
+  assert.equal(preflight.status, 0, preflight.stdout + preflight.stderr);
+  assert.equal(JSON.parse(preflight.stdout).fileCount, 4);
+  assert.equal(JSON.parse(preflight.stdout).clientCount, 1);
+  assert.deepEqual(await fs.readdir(temp), beforePreflight);
+  for (const p of base.data.parties) assert.ok(!preflight.stdout.includes(p.name));
+  passed++;
+  const hourlyCheck = clone(); hourlyCheck.data.feeMode = 'hourly';
+  await fs.writeFile(preflightInput, JSON.stringify(hourlyCheck));
+  const warningCheck = spawnSync(process.execPath, [path.join(skill, 'scripts', 'generate.mjs'), '--input', preflightInput, '--check-only'], {encoding: 'utf8'});
+  assert.equal(warningCheck.status, 0);
+  assert.equal(JSON.parse(warningCheck.stdout).warnings[0].code, 'hourly_cap_defaults_to_advance');
+  passed++;
   for (const [key, clientRole, otherRole] of [
     ['litigation_first_instance', 'first_plaintiff', 'first_defendant'],
     ['litigation_second_instance', 'appeal_appellee', 'appeal_appellant'],
@@ -50,12 +107,27 @@ try {
     const p = clone(); p.data.procedureType = key;
     p.data.parties = p.data.parties.slice(0, 2);
     p.data.parties[0].role = clientRole; p.data.parties[1].role = otherRole;
-    await run(key, p, 4);
+    p.data.lawyer2 = '测试律师乙';
+    if (key === 'litigation_first_instance') p.data.caseNo = '（2026）示例字第1号';
+    const bundle = await run(key, p, 4);
+    if (key === 'litigation_first_instance') {
+      tamper(bundle, 'authorization', '测试律师乙', '未指定律师', 'second_lawyer_missing');
+      tamper(bundle, 'agreement', '30,000.00', '30,001.00', 'fee_amount_mismatch');
+      tamper(bundle, 'agreement', '（含税，下同）', '（不含税，下同）', 'tax_mode_mismatch');
+      tamper(bundle, 'agreement', '均由甲方另行承担', '均由乙方承担', 'expense_mode_mismatch');
+      tamper(bundle, 'agreement', '示例仲裁委员会', '错误仲裁委员会', 'agreement_dispute_clause_mismatch');
+      tamper(bundle, 'letter', '（2026）示例字第1号', '错误案号', 'case_number_missing');
+    }
   }
   const mixed = clone();
   mixed.data.parties.push({name: '虚构自然人丁', role: 'first_plaintiff', partyType: '自然人', isClient: true,
     clientAddress: '示例市虚构路4号', clientIdNo: '000000000000000000'});
   await run('mixed_selected_clients', mixed, 7);
+  const alternative = clone();
+  Object.assign(alternative.data, {docs: ['agreement'], taxMode: 'excluded', expenseMode: 'firm',
+    conflictWaiver: true, conflictClient: '虚构关联客户戊'});
+  const alternateBundle = await run('agreement_options', alternative, 1);
+  tamper(alternateBundle, 'agreement', '虚构关联客户戊', '其他主体', 'conflict_waiver_mismatch');
   for (const [type, key] of [['execPartner', 'executive_partner'], ['delegate', 'delegate']]) {
     const p = clone(); p.data.docs = ['certificate'];
     Object.assign(p.data.parties[0], {partyType: type, repPosition: '执行事务合伙人', execPartnerName: '虚构合伙人机构'});
@@ -64,7 +136,9 @@ try {
   for (const fee of ['hourly', 'hybrid']) {
     const p = clone(); p.data.docs = ['agreement']; p.data.feeMode = fee;
     p.data.feeRate = '6'; p.data.feeCap = '100000'; p.data.branch = 'shanghai';
-    await run(fee + '_agreement', p, 1);
+    const bundle = await run(fee + '_agreement', p, 1);
+    if (fee === 'hourly') tamper(bundle, 'agreement', '100,000.00', '10,000.00', 'fee_cap_mismatch');
+    else tamper(bundle, 'agreement', '6.00%', '7.00%', 'fee_rate_mismatch');
   }
   const third = clone(); third.data.docs = ['authorization']; third.data.parties[0].role = 'first_third_party';
   third.data.parties = third.data.parties.slice(0, 2);
@@ -86,14 +160,19 @@ try {
   }, 'no_applicable_certificate');
   bad('prototype_role', p => p.data.parties[0].role = 'toString', 'invalid_selection');
   bad('authority_source', p => delete p.analysis.authorizationBasis, 'authority_source_required');
+  bad('amount_rounding', p => p.data.feeAmount = '100.001', 'unsupported_precision');
+  bad('rate_rounding', p => {p.data.feeMode = 'hybrid'; p.data.feeRate = '6.001';}, 'unsupported_precision');
+  bad('cap_rounding', p => {p.data.feeMode = 'hourly'; p.data.feeCap = '100.001';}, 'unsupported_precision');
+  bad('orphan_party', p => p.data.parties.push(null), 'object_required');
   for (const [key, plan, code] of bads) {
     assert.ok(validatePlan(plan).some(i => i.code === code), key);
     const input = path.join(temp, key + '.json'), output = path.join(temp, key);
     await fs.writeFile(input, JSON.stringify(plan));
     const r = spawnSync(process.execPath, [path.join(skill, 'scripts', 'generate.mjs'), '--input', input, '--output-dir', output], {encoding: 'utf8'});
     assert.equal(r.status, 2); assert.equal(JSON.parse(r.stdout).status, 'invalid_input');
+    assert.ok(JSON.parse(r.stdout).issues.every(i => typeof i.message === 'string'));
     assert.ok(!r.stdout.includes('never-echo-this'));
-    for (const p of plan.data.parties) assert.ok(!r.stdout.includes(p.name));
+    for (const p of plan.data.parties.filter(Boolean)) assert.ok(!r.stdout.includes(p.name));
     await assert.rejects(fs.access(output));
     passed++;
   }

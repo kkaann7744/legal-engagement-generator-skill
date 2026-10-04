@@ -23,7 +23,7 @@ class BundleVerification(unittest.TestCase):
         self.manifest = {'schemaVersion': 1, 'fileCount': 1, 'skippedCertificates': 0,
                          'files': [{'filename': self.name, 'docType': 'authorization', 'clientIndex': 0}]}
         self.paras = ['委 托 人：虚构客户甲有限公司', '虚构对方乙有限公司 买卖合同纠纷 作为委托人一审程序的代理人',
-                      '测试律师甲 测试代表甲 代理权限为特别授权', '委托人：虚构客户甲有限公司（盖章）', '2026年10月2日']
+                      '受 托 人：测试律师甲', '测试代表甲 代理权限为特别授权', '委托人：虚构客户甲有限公司（盖章）', '2026年10月2日']
         self.write()
 
     def tearDown(self):
@@ -96,6 +96,22 @@ class BundleVerification(unittest.TestCase):
         self.paras[1] = '虚构对方乙有限公司 买卖合同纠纷 一审判决 作为委托人二审程序的代理人'
         self.write()
         self.assertIn('procedure_missing', self.codes())
+
+    def test_overlapping_entity_names_are_not_other_clients(self):
+        self.plan['data']['parties'][1]['name'] = '客户甲'
+        self.write()
+        self.assertNotIn('other_party_as_client', self.codes())
+
+    def test_client_name_only_as_substring_is_not_a_signature(self):
+        self.paras = [p.replace('委 托 人：虚构客户甲有限公司', '委 托 人：虚构客户甲有限公司子公司').replace('委托人：虚构客户甲有限公司（盖章）', '委托人：虚构客户甲有限公司子公司（盖章）') for p in self.paras]
+        self.write()
+        self.assertIn('client_signature_or_title_missing', self.codes())
+
+    def test_second_lawyer_must_be_in_trustee_field(self):
+        self.plan['data']['lawyer2'] = '测试律师乙'
+        self.paras.append('旁注：测试律师乙')
+        self.write()
+        self.assertIn('second_lawyer_missing', self.codes())
 
 
 if __name__ == '__main__':

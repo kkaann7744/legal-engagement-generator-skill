@@ -4,7 +4,7 @@
 
 `schemaVersion` 固定为 1。`analysis.status` 为 `ready` 才能生成；`draft` 表示整理尚未完成。`unresolved` 必须是数组，ready 时必须为空。`sources` 用字段路径映射至材料文件及页码、条款或明确用户指令；它是模型核对的线索，不是程序证明字段正确的依据。生成授权书时 `authorizationBasis` 必须说明采用内置特别授权条款的来源，不能伪造用户确认。
 
-`data` 使用下列字段。生成器只接受已知字段，避免拼写错误被静默忽略。字符串不要传数组或数字；费用保留十进制字符串。
+`data` 使用下列字段。生成器只接受已知字段，避免拼写错误被静默忽略。字符串不要传数组或数字；费用保留十进制字符串；金额和比例最多两位小数，当前数值上限为 999999999999.99，不自动舍入超出精度的值。
 
 | 字段 | 规则 |
 |---|---|
@@ -22,7 +22,7 @@
 | feeMode | 生成 agreement 时必填：fixed、hybrid、hourly |
 | feeAmount | 生成 agreement 时必填：固定费用、前期固定费用或小时制预付金额，须大于零 |
 | feeRate | hybrid 时必填，0 至 100；仅为输入范围校验，不证明约定合法 |
-| feeCap | hourly 可选，填写时须大于零；空值沿用 feeAmount 作为封顶 |
+| feeCap | hourly 可选，填写时须大于零；空值沿用 feeAmount 作为封顶，并在生成前检查及生成结果中发出警告；须核对实际约定 |
 | taxMode、expenseMode | agreement 时必填：included/excluded、client/firm；沿用模板税费写法 |
 | arbInstitution、arbSeat | agreement 时必填；是委托协议的争议解决信息，不等同于本案仲裁机构 |
 | conflictWaiver | 可选布尔值，缺省 false；必须来自实际约定 |

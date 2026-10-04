@@ -8,6 +8,12 @@ Skill 位于 [`skills/legal-engagement-generator`](skills/legal-engagement-gener
 
 本仓库保留现有 Word 模板、分所资料及账户配置。使用时应按实际委托核对模板、收费条款和收款信息；这些资源不构成对外代理权限或律师事务所的官方发布。实际案件文件不在仓库内，样例和自动核验材料全部为虚构数据。第三方组件保留原有许可，未为事务所模板另行授予通用开源许可。
 
+## 使用改进
+
+- 生成前可只检查参数，一次返回中文缺项提示及预计文书数量，无需启动浏览器。
+- 成品核对两名律师、案由、所函案号，以及费用金额、比例、封顶、税费和协议争议条款。
+- 模型辅助生成时，超出两位小数的金额或比例不会自动舍入；小时制未填封顶金额时会提示模板默认规则。
+
 ## 安装与使用
 
 在 Codex 中输入：
@@ -30,7 +36,8 @@ Skill 位于 [`skills/legal-engagement-generator`](skills/legal-engagement-gener
 
 运行核验：
 
+    node skills/legal-engagement-generator/scripts/generate.mjs --input skills/legal-engagement-generator/assets/example-plan.json --check-only
     python3 tests/test_verify.py
     node tests/smoke.mjs
 
-第二条会在系统临时目录生成虚构案件文书并检查各程序、客户选择、自然人跳过以及失败输入；不会读取工作目录中的实际案件。当前版本已通过 11 项独立结构核验测试、23 项生成场景检查，以及虚构样例成品的版式检查。
+最后一条会在系统临时目录生成虚构案件文书并检查各程序、客户选择、自然人跳过以及失败输入；不会读取工作目录中的实际案件。当前版本已通过 14 项独立结构核验测试、39 项生成及错误拦截场景检查。内嵌模板及排版沿用此前完成样例版式检查的版本。
